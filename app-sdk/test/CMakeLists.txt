@@ -2,7 +2,7 @@
 PROJECT(tests)
 
 set(tests 
-			# test_initialize
+			test1
 			# test_heartbeat
 			# test_timeout
 			# test_server

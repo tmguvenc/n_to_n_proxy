@@ -1,78 +1,93 @@
-#include <utils.h>
-#include <connector.h>
+#include <zmq.h>
 #include <thread>
 #include <future>
 #include <iostream>
+#include <chrono>
 
-int main()
+void connect_and_send()
 {
 	auto context = zmq_ctx_new();
 	assert(context != nullptr);
 
-	auto server_socket = zmq_socket(context, ZMQ_ROUTER);
+	auto client_socket = zmq_socket(context, ZMQ_DEALER);
+	assert(client_socket != nullptr);
+
+	zmq_connect(client_socket, "tcp://127.0.0.1:5555");
+
+	zmq_send(client_socket, nullptr, 0, ZMQ_SNDMORE);
+	zmq_send(client_socket, "frame1", 6, 0);
+
+	std::this_thread::sleep_for(std::chrono::milliseconds(1));
+
+	zmq_send(client_socket, nullptr, 0, ZMQ_SNDMORE);
+	zmq_send(client_socket, "frame2", 6, 0);
+
+	std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+	zmq_send(client_socket, nullptr, 0, ZMQ_SNDMORE);
+	zmq_send(client_socket, "frame3", 6, 0);
+
+	std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+
+	zmq_send(client_socket, nullptr, 0, ZMQ_SNDMORE);
+	zmq_send(client_socket, "quit", 4, 0);
+
+	std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+	zmq_close(client_socket);
+	zmq_ctx_destroy(context);
+}
+
+int main()
+{
+	std::async([]()
+	{
+		connect_and_send();
+	});
+
+	auto context = zmq_ctx_new();
 	assert(context != nullptr);
+
+	auto server_socket = zmq_socket(context, ZMQ_ROUTER);
+	assert(server_socket != nullptr);
 
 	auto val = 1;
 	auto xx = zmq_setsockopt(server_socket, ZMQ_ROUTER_MANDATORY, &val, sizeof val);
 	assert(xx == 0);
 
-#ifdef USE_CURVE
-	int opt = 1;
-	std::string secretKey("Sd[BRNU[GQ6YL<P5-O!b]{pD@^yxNQ).Iln9%eU1");
-
-	auto curve_server = zmq_setsockopt(server_socket, ZMQ_CURVE_SERVER, &opt, sizeof opt);
-	assert(curve_server == 0);
-
-	auto secret_key = zmq_setsockopt(server_socket, ZMQ_CURVE_SECRETKEY, secretKey.c_str(), secretKey.length());
-	assert(secret_key == 0);
-#endif
-
 	auto bound = zmq_bind(server_socket, "tcp://*:5555");
 	assert(bound == 0);
 
-	const std::string module_name("test");
-
-	auto connector_loop = [module_name]()
-	{
-		auto connector = new Connector("tcp://localhost:5555", module_name.c_str());
-		connector->connect();
-
-		auto counter = 4;
-		while (counter--)
-		{
-			connector->heartbeat(-1);
-		}
-
-		delete connector;
+	zmq_pollitem_t items[] = {
+		{ server_socket, 0, ZMQ_POLLIN, 0 }
 	};
 
-	auto conn_feature = std::async(std::launch::async, connector_loop);
+	char rec_buf[1024];
 
-	std::string client_name;
-	auto client_message = recv_client_message(server_socket, client_name);
-	assert(client_message->type() == Init);
-
-	auto counter = 4;
-
-	while (counter--)
+	while (true)
 	{
-		std::this_thread::sleep_for(std::chrono::milliseconds(6000));
+		//  Poll frontend only if we have available workers
+		int rc = zmq_poll(items, 1, 100000);
 
-		// send ping message
-        //auto req = std::make_unique<ServerMessage>();
-        std::unique_ptr<ServerMessage> req(new ServerMessage);
-		req->set_type(Ping);
-		send_server_message(server_socket, req.get(), client_name);
+		if (items[0].revents & ZMQ_POLLIN)
+		{
+			// client id
+			zmq_recv(server_socket, rec_buf, sizeof(rec_buf), 0);
 
-		// expect pong message
-		std::string client_name_ping;
-		auto client = recv_client_message(server_socket, client_name_ping);
-		assert(client->type() == Pong);
+			// null frame
+			zmq_recv(server_socket, rec_buf, sizeof(rec_buf), 0);
 
-		std::cout << "Round trip: " << counter << '\n';
+			// data
+			int count = zmq_recv(server_socket, rec_buf, sizeof(rec_buf), 0);
+
+			auto aa = std::string(rec_buf, count);
+
+			if (aa == "quit")
+				break;
+
+			std::cout << aa.c_str() << std::endl;
+		}
 	}
-
-	conn_feature.get();
 
 	zmq_close(server_socket);
 	zmq_ctx_destroy(context);
